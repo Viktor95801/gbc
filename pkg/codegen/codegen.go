@@ -3,7 +3,6 @@ package codegen
 import (
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -71,7 +70,7 @@ func NewContext(targetArch string) *Context {
 		ws = 4
 		wt = "w"
 	default:
-		fmt.Fprintf(os.Stderr, "warning: unrecognized architecture '%s', defaulting to 64-bit\n", runtime.GOARCH)
+		fmt.Fprintf(os.Stderr, "warning: unrecognized architecture '%s', defaulting to 64-bit\n", targetArch)
 		ws = 8
 		wt = "l"
 	}
@@ -269,111 +268,114 @@ func (ctx *Context) collectGlobals(node *ast.Node) {
 }
 
 func (ctx *Context) findByteArrays(root *ast.Node) {
-	for {
-		changedInPass := false
-		var astWalker func(*ast.Node)
-		astWalker = func(n *ast.Node) {
-			if n == nil {
-				return
+	var changedInPass bool
+
+	var astWalker func(*ast.Node)
+	astWalker = func(n *ast.Node) {
+		if n == nil {
+			return
+		}
+
+		switch n.Type {
+		case ast.VarDecl:
+			d := n.Data.(ast.VarDeclNode)
+			if d.IsVector && len(d.InitList) == 1 && d.InitList[0].Type == ast.String {
+				sym := ctx.findSymbol(d.Name)
+				if sym != nil && !sym.IsByteArray {
+					sym.IsByteArray = true
+					changedInPass = true
+				}
 			}
 
-			switch n.Type {
-			case ast.VarDecl:
-				d := n.Data.(ast.VarDeclNode)
-				if d.IsVector && len(d.InitList) == 1 && d.InitList[0].Type == ast.String {
-					sym := ctx.findSymbol(d.Name)
-					if sym != nil && !sym.IsByteArray {
-						sym.IsByteArray = true
+		case ast.Assign:
+			d := n.Data.(ast.AssignNode)
+			if d.Lhs.Type == ast.Ident {
+				lhsSym := ctx.findSymbol(d.Lhs.Data.(ast.IdentNode).Name)
+				if lhsSym != nil && !lhsSym.IsByteArray {
+					rhsIsByteArray := false
+					rhsNode := d.Rhs
+					switch rhsNode.Type {
+					case ast.String:
+						rhsIsByteArray = true
+					case ast.Ident:
+						rhsSym := ctx.findSymbol(rhsNode.Data.(ast.IdentNode).Name)
+						if rhsSym != nil && rhsSym.IsByteArray {
+							rhsIsByteArray = true
+						}
+					}
+
+					if rhsIsByteArray {
+						lhsSym.IsByteArray = true
 						changedInPass = true
 					}
 				}
-
-			case ast.Assign:
-				d := n.Data.(ast.AssignNode)
-				if d.Lhs.Type == ast.Ident {
-					lhsSym := ctx.findSymbol(d.Lhs.Data.(ast.IdentNode).Name)
-					if lhsSym != nil && !lhsSym.IsByteArray {
-						rhsIsByteArray := false
-						rhsNode := d.Rhs
-						switch rhsNode.Type {
-						case ast.String:
-							rhsIsByteArray = true
-						case ast.Ident:
-							rhsSym := ctx.findSymbol(rhsNode.Data.(ast.IdentNode).Name)
-							if rhsSym != nil && rhsSym.IsByteArray {
-								rhsIsByteArray = true
-							}
-						}
-
-						if rhsIsByteArray {
-							lhsSym.IsByteArray = true
-							changedInPass = true
-						}
-					}
-				}
-			}
-
-			switch d := n.Data.(type) {
-			case ast.AssignNode:
-				astWalker(d.Lhs)
-				astWalker(d.Rhs)
-			case ast.BinaryOpNode:
-				astWalker(d.Left)
-				astWalker(d.Right)
-			case ast.UnaryOpNode:
-				astWalker(d.Expr)
-			case ast.PostfixOpNode:
-				astWalker(d.Expr)
-			case ast.IndirectionNode:
-				astWalker(d.Expr)
-			case ast.AddressOfNode:
-				astWalker(d.LValue)
-			case ast.TernaryNode:
-				astWalker(d.Cond)
-				astWalker(d.ThenExpr)
-				astWalker(d.ElseExpr)
-			case ast.SubscriptNode:
-				astWalker(d.Array)
-				astWalker(d.Index)
-			case ast.FuncCallNode:
-				astWalker(d.FuncExpr)
-				for _, arg := range d.Args {
-					astWalker(arg)
-				}
-			case ast.FuncDeclNode:
-				astWalker(d.Body)
-			case ast.VarDeclNode:
-				for _, init := range d.InitList {
-					astWalker(init)
-				}
-				astWalker(d.SizeExpr)
-			case ast.IfNode:
-				astWalker(d.Cond)
-				astWalker(d.ThenBody)
-				astWalker(d.ElseBody)
-			case ast.WhileNode:
-				astWalker(d.Cond)
-				astWalker(d.Body)
-			case ast.ReturnNode:
-				astWalker(d.Expr)
-			case ast.BlockNode:
-				for _, s := range d.Stmts {
-					astWalker(s)
-				}
-			case ast.SwitchNode:
-				astWalker(d.Expr)
-				astWalker(d.Body)
-			case ast.CaseNode:
-				astWalker(d.Value)
-				astWalker(d.Body)
-			case ast.DefaultNode:
-				astWalker(d.Body)
-			case ast.LabelNode:
-				astWalker(d.Stmt)
 			}
 		}
 
-		astWalker(root)
+		switch d := n.Data.(type) {
+		case ast.AssignNode:
+			astWalker(d.Lhs)
+			astWalker(d.Rhs)
+		case ast.BinaryOpNode:
+			astWalker(d.Left)
+			astWalker(d.Right)
+		case ast.UnaryOpNode:
+			astWalker(d.Expr)
+		case ast.PostfixOpNode:
+			astWalker(d.Expr)
+		case ast.IndirectionNode:
+			astWalker(d.Expr)
+		case ast.AddressOfNode:
+			astWalker(d.LValue)
+		case ast.TernaryNode:
+			astWalker(d.Cond)
+			astWalker(d.ThenExpr)
+			astWalker(d.ElseExpr)
+		case ast.SubscriptNode:
+			astWalker(d.Array)
+			astWalker(d.Index)
+		case ast.FuncCallNode:
+			astWalker(d.FuncExpr)
+			for _, arg := range d.Args {
+				astWalker(arg)
+			}
+		case ast.FuncDeclNode:
+			astWalker(d.Body)
+		case ast.VarDeclNode:
+			for _, init := range d.InitList {
+				astWalker(init)
+			}
+			astWalker(d.SizeExpr)
+		case ast.IfNode:
+			astWalker(d.Cond)
+			astWalker(d.ThenBody)
+			astWalker(d.ElseBody)
+		case ast.WhileNode:
+			astWalker(d.Cond)
+			astWalker(d.Body)
+		case ast.ReturnNode:
+			astWalker(d.Expr)
+		case ast.BlockNode:
+			for _, s := range d.Stmts {
+				astWalker(s)
+			}
+		case ast.SwitchNode:
+			astWalker(d.Expr)
+			astWalker(d.Body)
+		case ast.CaseNode:
+			astWalker(d.Value)
+			astWalker(d.Body)
+		case ast.DefaultNode:
+			astWalker(d.Body)
+		case ast.LabelNode:
+			astWalker(d.Stmt)
+		}
+	}
+
+	for {
+		changedInPass = false
+
+		astWalker(root) // modifies `changedInPass`
 		if !changedInPass {
 			break
 		}
@@ -791,7 +793,10 @@ func (ctx *Context) codegenStmt(node *ast.Node) (terminates bool) {
 		var blockTerminates bool
 		for _, stmt := range node.Data.(ast.BlockNode).Stmts {
 			if blockTerminates {
-				isLabel := stmt.Type == ast.Label || stmt.Type == ast.Case || stmt.Type == ast.Default
+				isLabel := stmt.Type == ast.Label ||
+					stmt.Type == ast.Case ||
+					stmt.Type == ast.Default
+
 				if !isLabel {
 					util.Warn(util.WarnUnreachableCode, stmt.Tok, "Unreachable code.")
 					continue
