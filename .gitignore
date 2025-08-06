@@ -7,3 +7,5 @@ gbc
 libb
 examples/libb
 tests/libb
+
+*.exe

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -12,13 +11,12 @@ import (
 	"strings"
 
 	"gbc/pkg/ast"
+	"gbc/pkg/backend"
 	"gbc/pkg/codegen"
 	"gbc/pkg/lexer"
 	"gbc/pkg/parser"
 	"gbc/pkg/token"
 	"gbc/pkg/util"
-
-	"modernc.org/libqbe"
 )
 
 type linkerArgs []string
@@ -43,11 +41,22 @@ func (i *includePaths) Set(value string) error {
 }
 
 func main() {
+	// If no argument, print help
+	if len(os.Args) == 1 {
+		printHelp()
+		os.Exit(1)
+	}
+
+	// Parse command line arguments
 	outFile := flag.String("o", "a.out", "Output file name.")
 	std := flag.String("std", "Bx", "Specify language standard (B, Bx).")
 	wall := flag.Bool("Wall", false, "Enable most warnings.")
 	w_no_all := flag.Bool("Wno-all", false, "Disable all warnings.")
 	w_pedantic := flag.Bool("pedantic", false, "Issue all warnings demanded by the current B std.")
+
+	target := flag.String("target", runtime.GOOS+"-"+runtime.GOARCH, "Target platform (e.g., linux-arm64)")
+	flag.StringVar(target, "t", runtime.GOOS+"-"+runtime.GOARCH, "Target platform (e.g., linux-arm64)")
+	compiler_backend := flag.String("backend", "qbe", "Backend to use (qbe, c-lang)")
 
 	var linkerFlags linkerArgs
 	flag.Var(&linkerFlags, "L", "Pass argument to the linker")
@@ -71,6 +80,23 @@ func main() {
 	if *help {
 		printHelp()
 		return
+	}
+
+	if !validateTarget(*target) {
+		fmt.Printf("Invalid target: %s\n", *target)
+		printHelp()
+		return
+	}
+
+	if !validateBackend(*compiler_backend) {
+		fmt.Printf("Invalid backend: %s\n", *compiler_backend)
+		printHelp()
+		return
+	} else if *compiler_backend == "qbe" {
+		if runtime.GOOS == "windows" {
+			fmt.Println("libQBE backend is not supported on Windows")
+			return
+		}
 	}
 
 	applyStd(*std)
@@ -151,17 +177,14 @@ func main() {
 	cg := codegen.NewContext(runtime.GOARCH)
 	qbeIR, inlineAsm := cg.Generate(astRoot)
 
-	fmt.Println("Calling libqbe on our QBE IR...")
-	target := libqbe.DefaultTarget(runtime.GOOS, runtime.GOARCH)
-	var asmBuf bytes.Buffer
-	err := libqbe.Main(target, "input.ssa", strings.NewReader(qbeIR), &asmBuf, nil)
+	genAsm, err := backend.CompileQBE(qbeIR, runtime.GOOS+runtime.GOARCH)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n--- QBE Compilation Failed ---\nGenerated IR:\n%s\n", qbeIR)
 		util.Error(token.Token{}, "libqbe error: %v", err)
 	}
 
 	fmt.Printf("Assembling and linking to create '%s'...\n", *outFile)
-	err = assembleAndLink(*outFile, asmBuf.String(), inlineAsm, linkerFlags)
+	err = assembleAndLink(*outFile, genAsm, inlineAsm, linkerFlags)
 	if err != nil {
 		util.Error(token.Token{}, "assembler/linker failed: %v", err)
 	}
@@ -333,6 +356,14 @@ func printListItem(name, desc string, enabled bool) {
 	}
 	fmt.Fprintf(os.Stderr, "      %-20s %s %s\n", name, descPadded, state)
 }
+func printListItemNoEnable(name, desc string) {
+	const descWidth = 75
+	descPadded := desc
+	if len(desc) < descWidth {
+		descPadded += strings.Repeat(" ", descWidth-len(desc))
+	}
+	fmt.Fprintf(os.Stderr, "      %-20s %s\n", name, descPadded)
+}
 
 func printHelp() {
 	fmt.Fprintf(os.Stderr, "\nCopyright (c) 2025: xplshn and contributors\n")
@@ -352,6 +383,23 @@ func printHelp() {
 	printItem("-h, --help", "Display this information.")
 	printItem("-std=<std>", "Specify language standard (B, Bx). Default: Bx")
 	printItem("-pedantic", "Issue all warnings demanded by the current B std.")
+
+	printSection("Targets")
+	printItem("-t=<target>, --target=<target>", "Compile for a specific target. Defaults to the OS and archtecture of the host machine.")
+	printListHeader("targets")
+	for i := 0; i < len(targetOs); i++ {
+		for j := 0; j < len(targetArch); j++ {
+			target := fmt.Sprintf("%s-%s", targetOs[i], targetArch[j])
+			printListItemNoEnable(target, "Compile for "+target)
+		}
+	}
+
+	printSection("Backends")
+	printItem("--backend=<backend>", "Compile using a specific backend (qbe-ir, c-lang for example).")
+	printListHeader("backends")
+	for i := 0; i < len(backends); i++ {
+		printListItemNoEnable(backends[i], "Compile using "+backends[i])
+	}
 
 	printSection("Warning Flags")
 	printItem("-Wall", "Enable most warnings.")
